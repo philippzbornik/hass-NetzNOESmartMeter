@@ -17,6 +17,7 @@ This project is based on the [Wiener Netze Smartmeter](https://github.com/Darwin
 
 ### Current Contributors
 * [TobiKr](https://github.com/TobiKr) - Netz NÖ adaptation
+* [TheJoeIaut](https://github.com/TheJoeIaut) - Correct interval timestamps for FTM imports
 
 ## I would like to join this list. How can I help the project?
 

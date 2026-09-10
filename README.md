@@ -41,3 +41,7 @@ After successful configuration you can add sensors to your favourite dashboard, 
 
 ### Manual
 See [Example configuration files](example/configuration.yaml)
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
