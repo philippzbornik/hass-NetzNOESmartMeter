@@ -12,12 +12,13 @@ from homeassistant.components.recorder.models import StatisticData, StatisticMet
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
     get_last_statistics,
+    statistics_during_period,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
 from .AsyncSmartmeter import AsyncSmartmeter
-from .const import DOMAIN
+from .const import DOMAIN, IMPORT_ESTIMATED_VALUES, REIMPORT_DAYS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -149,8 +150,63 @@ class Importer:
     async def _incremental_import_statistics(
         self, start: datetime, total_usage: Decimal
     ) -> Decimal:
-        """Perform incremental import of statistics."""
+        """Perform incremental import of statistics.
+
+        Resuming exactly at the last written statistic means an hour is never
+        looked at again. Netz NO however delivers some days as estimates first
+        and replaces them with measured values later, so we re-import a trailing
+        window and let the recorder overwrite those hours.
+        """
+        if REIMPORT_DAYS > 0:
+            widened = await self._widen_to_reimport_window(start)
+            if widened is not None:
+                start, total_usage = widened
+
         return await self._import_statistics(start=start, total_usage=total_usage)
+
+    async def _widen_to_reimport_window(
+        self, start: datetime
+    ) -> Optional[tuple[datetime, Decimal]]:
+        """Move the import start back by REIMPORT_DAYS.
+
+        Returns the widened start together with the cumulative sum that applies
+        immediately before it, or None when that sum cannot be established - in
+        which case the caller must keep the original start, because rebuilding
+        the sums from a wrong base would corrupt every following row.
+        """
+        window_start = datetime.now(timezone.utc) - timedelta(days=REIMPORT_DAYS)
+        window_start = window_start.replace(minute=0, second=0, microsecond=0)
+        if window_start >= start:
+            return None
+
+        rows = await get_instance(self.hass).async_add_executor_job(
+            statistics_during_period,
+            self.hass,
+            window_start - timedelta(days=2),
+            window_start,
+            {self.id},
+            "hour",
+            None,
+            {"sum"},
+        )
+        preceding = rows.get(self.id) or []
+        if not preceding or preceding[-1].get("sum") is None:
+            _LOGGER.debug(
+                "No statistics before %s, keeping the original import start %s",
+                window_start,
+                start,
+            )
+            return None
+
+        base_sum = Decimal(str(preceding[-1]["sum"]))
+        _LOGGER.debug(
+            "Re-importing the trailing %d days: start %s -> %s (base sum %s)",
+            REIMPORT_DAYS,
+            start,
+            window_start,
+            base_sum,
+        )
+        return window_start, base_sum
 
     async def _import_statistics(
         self,
@@ -207,8 +263,16 @@ class Importer:
 
         while current_date <= end_date:
             try:
-                times, values = await self.async_smartmeter.get_consumption_day(
+                (
+                    times,
+                    metered,
+                    estimated,
+                    qualities,
+                ) = await self.async_smartmeter.get_consumption_day_detailed(
                     current_date, self.metering_point_id
+                )
+                values = self._merge_readings(
+                    current_date, metered, estimated, qualities
                 )
 
                 if values:
@@ -273,6 +337,44 @@ class Importer:
             async_add_external_statistics(self.hass, metadata, statistics)
 
         return total_usage
+
+    def _merge_readings(
+        self,
+        day: date,
+        metered: list,
+        estimated: list,
+        qualities: list,
+    ) -> list:
+        """Combine measured and estimated readings for one day.
+
+        Netz NO returns a day that has not been read out yet with meteredValues
+        as a list of None and the readings in estimatedValues (quality "L3").
+        Measured values always win; estimates are only used when enabled.
+        """
+        if not IMPORT_ESTIMATED_VALUES or not estimated:
+            return metered
+
+        merged = list(metered) if metered else [None] * len(estimated)
+        if len(merged) < len(estimated):
+            merged.extend([None] * (len(estimated) - len(merged)))
+
+        filled = 0
+        for i, value in enumerate(estimated):
+            if value is None or merged[i] is not None:
+                continue
+            merged[i] = value
+            filled += 1
+
+        if filled:
+            quality = next((q for q in qualities if q), "unknown")
+            _LOGGER.warning(
+                "Using %d estimated reading(s) of quality %s for %s - these are "
+                "replaced automatically once Netz NO delivers measured values",
+                filled,
+                quality,
+                day,
+            )
+        return merged
 
     async def _import_daily_statistics(
         self,

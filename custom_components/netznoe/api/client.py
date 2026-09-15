@@ -230,6 +230,46 @@ class Smartmeter:
             response.get("meteredValues", []),
         )
 
+    def get_consumption_day_detailed(
+        self, day: date, meter_id: Optional[str] = None
+    ) -> Tuple[
+        List[str], List[Optional[float]], List[Optional[float]], List[Optional[str]]
+    ]:
+        """Get daily consumption data including the estimated values.
+
+        Netz NO fills either meteredValues or estimatedValues for a given day: a
+        day that has only estimates comes back with meteredValues as a list of
+        None, the readings in estimatedValues and a quality of "L3".
+
+        Returns:
+            Tuple of (peak_demand_times, metered_values, estimated_values,
+            estimated_qualities)
+        """
+        meter_id = meter_id or self._metering_point_id
+        if not meter_id:
+            raise SmartmeterQueryError("No metering point ID available")
+
+        response = self._call_api(
+            const.ENDPOINT_CONSUMPTION_DAY,
+            query={"meterId": meter_id, "day": day.strftime(const.API_DATE_FORMAT)},
+        )
+        logger.debug("ConsumptionDay raw response: %s", response)
+
+        # API may return multiple entries for energy community users.
+        # We want the entry with ec_id == null (the base meter).
+        if isinstance(response, list) and len(response) > 0:
+            base_entries = [r for r in response if r.get("ec_id") is None]
+            response = base_entries[0] if base_entries else response[0]
+        elif isinstance(response, list):
+            return ([], [], [], [])
+
+        return (
+            response.get("peakDemandTimes", []),
+            response.get("meteredValues", []),
+            response.get("estimatedValues", []),
+            response.get("estimatedQualities", []),
+        )
+
     def get_consumption_month(
         self, year: int, month: int, meter_id: Optional[str] = None
     ) -> Tuple[List[str], List[float]]:
