@@ -22,6 +22,12 @@ from .const import DOMAIN, IMPORT_ESTIMATED_VALUES, REIMPORT_DAYS
 
 _LOGGER = logging.getLogger(__name__)
 
+# Tolerance for the regression guard below. The known total is a Decimal built
+# from a float while the imported total is built from its string form, so the
+# two can differ by ~1e-12 while representing the same reading. Netz NO reports
+# three decimals, so a milli-kWh is far below the data's resolution.
+_TOTAL_TOLERANCE = Decimal("0.001")
+
 
 class Importer:
     """Import historical consumption data into Home Assistant statistics."""
@@ -171,7 +177,7 @@ class Importer:
         imported_total = await self._import_statistics(
             start=start, total_usage=total_usage
         )
-        if imported_total < last_known_total:
+        if imported_total < last_known_total - _TOTAL_TOLERANCE:
             _LOGGER.warning(
                 "Import returned %s but the statistics already hold %s - the "
                 "re-import window produced fewer readings than it covers, "
@@ -277,6 +283,7 @@ class Importer:
         """
         hourly_readings = defaultdict(Decimal)
         failed_days = 0
+        first_failure: Optional[str] = None
         current_date = start.date()
         end_date = end.date()
 
@@ -333,14 +340,18 @@ class Importer:
 
             except Exception as e:
                 failed_days += 1
+                if first_failure is None:
+                    first_failure = f"{type(e).__name__}: {e}"
                 _LOGGER.debug("Could not fetch data for %s: %s", current_date, e)
 
             current_date += timedelta(days=1)
 
         if failed_days:
             _LOGGER.warning(
-                "Netz NO returned no usable data for %d of the requested days",
+                "Netz NO returned no usable data for %d of the requested days "
+                "(first error: %s)",
                 failed_days,
+                first_failure,
             )
 
         # Build statistics with hourly resolution

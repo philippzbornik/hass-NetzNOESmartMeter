@@ -18,10 +18,14 @@ def is_meter_active(metering_point_data: dict) -> bool:
 # Re-import this many trailing days on every run instead of resuming exactly at
 # the last written statistic. Because the recorder upserts per start timestamp,
 # already-written hours can be corrected later. 0 restores the old behaviour.
-# Kept small on purpose: the day loop makes one API call per day, and 14 days
-# per run appeared to get throttled by Netz NO (every second run returned no
-# data at all).
-REIMPORT_DAYS = 3
+#
+# This is not just an API-load knob: it is the correction deadline for a day
+# that Netz NO first delivered as estimates. Once such a day ages out of the
+# window it can never be filled in, and while it is only partly inside the
+# window a late delivery back-fills part of it - which raises the cumulative
+# total by the wrong amount and looks like real data instead of a visible gap.
+# Set to 7 so a day has a week to be replaced by measured values.
+REIMPORT_DAYS = 7
 
 # Fill hours that have no measured reading from the API's estimatedValues
 # (quality "L3"). Off by default: estimates must not silently enter a statistic
