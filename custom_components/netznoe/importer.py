@@ -157,12 +157,30 @@ class Importer:
         and replaces them with measured values later, so we re-import a trailing
         window and let the recorder overwrite those hours.
         """
+        # The caller uses the return value as the meter reading, so it must
+        # never fall below what the statistics already contain: a widened
+        # window that yields nothing would otherwise report the total as of
+        # the window start and make the reading jump backwards.
+        last_known_total = total_usage
+
         if REIMPORT_DAYS > 0:
             widened = await self._widen_to_reimport_window(start)
             if widened is not None:
                 start, total_usage = widened
 
-        return await self._import_statistics(start=start, total_usage=total_usage)
+        imported_total = await self._import_statistics(
+            start=start, total_usage=total_usage
+        )
+        if imported_total < last_known_total:
+            _LOGGER.warning(
+                "Import returned %s but the statistics already hold %s - the "
+                "re-import window produced fewer readings than it covers, "
+                "keeping the known total",
+                imported_total,
+                last_known_total,
+            )
+            return last_known_total
+        return imported_total
 
     async def _widen_to_reimport_window(
         self, start: datetime
@@ -258,6 +276,7 @@ class Importer:
         previous day through 22:00 on the day itself.
         """
         hourly_readings = defaultdict(Decimal)
+        failed_days = 0
         current_date = start.date()
         end_date = end.date()
 
@@ -313,9 +332,16 @@ class Importer:
                         hourly_readings[hour_start] += Decimal(str(value))
 
             except Exception as e:
+                failed_days += 1
                 _LOGGER.debug("Could not fetch data for %s: %s", current_date, e)
 
             current_date += timedelta(days=1)
+
+        if failed_days:
+            _LOGGER.warning(
+                "Netz NO returned no usable data for %d of the requested days",
+                failed_days,
+            )
 
         # Build statistics with hourly resolution
         statistics = []
